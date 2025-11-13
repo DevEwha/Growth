@@ -1,69 +1,44 @@
 """
-python progressive_qa_lora.py \
-  --base_dir /home/devewha/ProgressivePruning_ver2/A \
-  --bundles_dir /home/devewha/ProgressivePruning_ver2/bundles \
+# Stage1
+python total_progressive_qa_lora.py \
+  --base_dir ~/ProgressivePruning_ver2/A \
+  --bundles_dir ~/ProgressivePruning_ver2/bundles \
   --stage 1 \
-  --out_adapters /home/devewha/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad --max_samples 16000 --seq_len 1024 --epochs 1 --bs 1 --grad_acc 16
+  --out_adapters ~/ProgressivePruning_ver2/adapters \
+  --qa_dataset squad --max_samples 20000 --max_eval_samples 8000 --seq_len 2048 --epochs 3 --bs 4 --grad_acc 16
+  
 
-python progressive_qa_lora.py \
-  --base_dir /home/devewha/ProgressivePruning_ver2/A \
-  --bundles_dir /home/devewha/ProgressivePruning_ver2/bundles \
+# Stage2
+python total_progressive_qa_lora.py \
+  --base_dir ~/ProgressivePruning_ver2/A \
+  --bundles_dir ~/ProgressivePruning_ver2/bundles \
   --stage 2 \
-  --out_adapters /home/devewha/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad --max_samples 16000 --seq_len 1024 --epochs 1 --bs 1 --grad_acc 16
-
-python progressive_qa_lora.py \
-  --base_dir /home/devewha/ProgressivePruning_ver2/A \
-  --bundles_dir /home/devewha/ProgressivePruning_ver2/bundles \
-  --stage 3 \
-  --out_adapters /home/devewha/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad --max_samples 16000 --seq_len 1024 --epochs 1 --bs 1 --grad_acc 16
-
-# A 단계 (A LoRA: QA SFT)
-python progressive_qa_lora.py \
-  --base_dir /home/devewha/ProgressivePruning_ver2/A \
-  --bundles_dir /home/devewha/ProgressivePruning_ver2/bundles \
-  --stage 1 \
-  --out_adapters /home/devewha/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad --max_samples 16000 --seq_len 1024 --epochs 3 --bs 1 --grad_acc 32
-
-# B 단계 (A 고정 + B 복구 + B LoRA: QA SFT)
-python progressive_qa_lora.py \
-  --base_dir /home/devewha/ProgressivePruning_ver2/A \
-  --bundles_dir /home/devewha/ProgressivePruning_ver2/bundles \
-  --stage 2 \
-  --out_adapters /home/devewha/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad --max_samples 16000 --seq_len 1024 --epochs 3 --bs 1 --grad_acc 32
-
-# C 단계 (A,B 고정 + C 복구 + C LoRA: QA SFT)
-python progressive_qa_lora.py \
-  --base_dir /home/devewha/ProgressivePruning_ver2/A \
-  --bundles_dir /home/devewha/ProgressivePruning_ver2/bundles \
-  --stage 3 \
-  --out_adapters /home/devewha/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad_v2 --max_samples 16000 --seq_len 1024 --epochs 3 --bs 1 --grad_acc 32
+  --out_adapters ~/ProgressivePruning_ver2/adapters \
+  --qa_dataset squad --max_samples 20000 --max_eval_samples 8000 --seq_len 2048 --epochs 2 --bs 4 --grad_acc 8 --lr 2e-4
 
 """
-
+#A어댑터, AB어댑터 생성
 #!/usr/bin/env python3
-# progressive_qa_lora.py (fixed)
 
 import os, json, torch
 import re
 import torch.nn.functional as F
+import torch.nn as nn
 from copy import deepcopy
 from typing import List
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments,
-    default_data_collator, Trainer
+    default_data_collator
 )
 from safetensors.torch import load_file
 from peft import LoraConfig, get_peft_model, PeftModel
-from datetime import datetime, UTC
+from datetime import datetime, timezone as _tz
 from peft.utils import get_peft_model_state_dict
 
+import matplotlib.pyplot as plt
+
+UTC = _tz.utc
 
 def export_adapter_pt_and_recipe(model, out_dir, adapter_name, *, base_dir, bundles_dir, stage, trained_indices, tokenizer_dir=None):
     """
@@ -157,11 +132,24 @@ def _peft_cfg_to_dict(cfg):
 # ----------------------------
 # Helpers (layers / devices)
 # ----------------------------
+CANON_PATH = "model.model.layers"
 
-# 🔧 ADD: robust layer container finder
-def _get_layer_container(model):
+def _resolve_attr_path(root, dotted: str):
+    """root.dotted 를 따라 내려가서 (parent, last_name, value) 튜플 반환"""
+    parent = root
+    segs = dotted.split(".")
+    for seg in segs[:-1]:
+        parent = getattr(parent, seg)
+    last = segs[-1]
+    val = getattr(parent, last)
+    return parent, last, val
+
+def _canonicalize_layers(model):
     """
-    Return the ModuleList of decoder layers for LLaMA/OPT across PEFT/Accelerate wrappers.
+    1) 다양한 후보 중 실제 레이어 컨테이너를 찾는다
+    2) tuple이면 nn.ModuleList로 바꾼다
+    3) 표준 경로(CANON_PATH)에 그 컨테이너를 꽂는다
+    4) model._canonical_layers, model._canonical_layers_path 로도 저장한다
     """
     candidates = [
         "model.layers",
@@ -173,22 +161,57 @@ def _get_layer_container(model):
         "base_model.model.model.layers",
         "base_model.model.model.decoder.layers",
     ]
+    found = None
+    found_parent = None
+    found_name = None
+    found_path = None
+
     for path in candidates:
-        cur = model
         try:
-            for seg in path.split("."):
-                cur = getattr(cur, seg)
-            # a ModuleList-like container?
-            if hasattr(cur, "__len__") and hasattr(cur, "__getitem__"):
-                return cur
+            parent, name, cur = _resolve_attr_path(model, path)
         except Exception:
             continue
-    raise AttributeError("Could not locate decoder layer container on model (checked: {})."
-                         .format(", ".join(candidates)))
+        if hasattr(cur, "__len__") and hasattr(cur, "__getitem__"):
+            found, found_parent, found_name, found_path = cur, parent, name, path
+            break
+
+    if found is None:
+        raise AttributeError("decoder layers not found (checked: {})".format(", ".join(candidates)))
+
+    # 불변이면 교체
+    if not isinstance(found, (list, nn.ModuleList)):
+        try:
+            new_cur = nn.ModuleList(list(found))
+        except Exception as e:
+            raise TypeError(f"layers container is immutable and not list-able: {e}")
+        setattr(found_parent, found_name, new_cur)
+        found = new_cur
+
+    # 가능하면 표준 경로(CANON_PATH)에 alias 꽂기 (실패해도 무시)
+    try:
+        canon_parent, canon_last, _ = _resolve_attr_path(model, CANON_PATH.replace(".layers", ""))
+        setattr(canon_parent, "layers", found)  # alias
+        model._canonical_layers_path = CANON_PATH
+    except Exception:
+        # 표준 경로가 없으면 실제 찾은 경로를 기록
+        model._canonical_layers_path = found_path
+
+    # 캐시
+    model._canonical_layers = found
+    return found
 
 
-def _get_layers(model, is_opt: bool):
-    return model.model.decoder.layers if is_opt else model.model.layers
+def _get_layer_container(model):
+    # 항상 표준화된 컨테이너만
+    if not hasattr(model, "_canonical_layers"):
+        _canonicalize_layers(model)
+    return model._canonical_layers
+
+def _layer_name_prefix(model, i: int):
+    # 이름 기반 활성화 시 패턴도 표준으로 고정
+    if not hasattr(model, "_canonical_layers_path"):
+        _canonicalize_layers(model)
+    return f"{model._canonical_layers_path}.{i}."
 
 
 def _assert_bundle_files_exist(bundles_dir: str, group: str, indices: list):
@@ -312,15 +335,14 @@ def _reapply_passlayers_from_manifest(model, base_dir: str):
         return model
 
     # 1) 다양한 스키마 지원: simdrop, top-level, stages.*
-    removed = None
     removed = (man.get("simdrop", {}) or {}).get("removed_layers")
     if not removed:
         removed = man.get("removed_layers")
     if not removed:
-        stages = man.get("stages", {})
-        A_drop = (stages.get("A", {}) or {}).get("dropped_layers", [])
-        B_rem = (stages.get("B", {}) or {}).get("removed_layers", [])
-        C_rem = (stages.get("C", {}) or {}).get("removed_layers", [])
+        stages = man.get("stages", {}) or {}
+        A_drop = (stages.get("A", {}) or {}).get("dropped_layers", []) or []
+        B_rem = (stages.get("B", {}) or {}).get("removed_layers", []) or []
+        C_rem = (stages.get("C", {}) or {}).get("removed_layers", []) or []
         # A 단계에서 빈자리를 메워야 하므로, A에서 드랍된(= B,C 통합) 전 레이어를 대상으로 패스레이어 적용
         removed = A_drop or sorted(set(B_rem + C_rem))
 
@@ -328,53 +350,38 @@ def _reapply_passlayers_from_manifest(model, base_dir: str):
         print("[reapply] removed_layers empty (checked simdrop/top-level/stages) -> skip")
         return model
 
+    # 정규화
+    try:
+        removed = sorted(set(int(i) for i in removed))
+    except Exception:
+        print("[reapply] non-integer indices in removed_layers -> skip")
+        return model
+
     # ---- PassLayer 선택 (프로젝트 커스텀 있으면 사용, 없으면 SafePass) ----
     try:
         from lib.identity import LlamaPassLayer as _Inner
         class _Wrapper(nn.Module):
             def __init__(self, hidden):
-                super().__init__(); self.inner = _Inner(hidden)
+                super().__init__()
+                self.inner = _Inner(hidden)
             def forward(self, hidden_states, *a, **kw):
                 out = self.inner(hidden_states, *a, **kw)
                 return out[0] if isinstance(out, tuple) else out
-        def _make(h): return _Wrapper(h)
+        def _make(h): 
+            return _Wrapper(h)
         print("[reapply] using project LlamaPassLayer")
     except Exception:
         class SafePass(nn.Module):
             def __init__(self, hidden):
                 super().__init__()
             def forward(self, x, *a, **kw):
-                return x
-        def _make(h): return SafePass(h)
+               return x
+        def _make(h): 
+            return SafePass(h)
         print("[reapply] using SafePassLayer")
 
-    """
-    # ---- 레이어 컨테이너 찾기 (더 튼튼하게) ----
-    def _get_layer_container(model):
-        cands = [
-            "model.layers",
-            "model.decoder.layers",
-            "model.model.layers",
-            "model.model.decoder.layers",
-            "base_model.model.layers",
-            "base_model.model.decoder.layers",
-            "base_model.model.model.layers",
-            "base_model.model.model.decoder.layers",
-        ]
-        for path in cands:
-            cur = model
-            try:
-                for seg in path.split("."):
-                    cur = getattr(cur, seg)
-                if hasattr(cur, "__len__") and hasattr(cur, "__getitem__"):
-                    return cur
-            except Exception:
-                pass
-        raise AttributeError("Could not locate decoder layer container.")
-    """
-
     try:
-        layers = _get_layer_container(model)
+        layers = _get_layer_container(model) # 반드시 list/ModuleList여야 함
     except Exception as e:
         print("[reapply] cannot locate layers:", e, "-> skip")
         return model
@@ -391,7 +398,11 @@ def _reapply_passlayers_from_manifest(model, base_dir: str):
 
     for i in removed:
         if 0 <= int(i) < L:
-            layers[int(i)] = _make(hidden)
+            try: 
+                layers[int(i)] = _make(hidden)
+            except TypeError as te: 
+                print("[reapply] layer container may be immutable (tuple?) ->", te)
+                return model
         else:
             print(f"[reapply] index {i} out of range (0..{L-1}) -> skip this one")
 
@@ -434,65 +445,25 @@ def _freeze_all(model):
         p.requires_grad = False
 
 
-def _attach_new_adapter(model, name: str,
-                        target_modules=("q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"),
-                        r=8, alpha=16, dropout=0.05):
+def _attach_new_adapter(
+    model, name: str,
+    target_modules=("q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"),
+    r=8, alpha=16, dropout=0.05
+):
     cfg = LoraConfig(
-        r=r, lora_alpha=alpha, lora_dropout=dropout, bias="none", task_type="CAUSAL_LM",
+        r=r, lora_alpha=alpha, lora_dropout=dropout,
+        bias="none", task_type="CAUSAL_LM",
         target_modules=list(target_modules),
     )
+
     if isinstance(model, PeftModel):
-        if name in getattr(model, "peft_config", {}):
-            model.set_adapter(name)
-        else:
-            model.add_adapter(name, cfg)
-        model.set_adapter(name)
+        if name not in getattr(model, "peft_config", {}):   # 이미 있으면 다시 안 붙임
+            model.add_adapter(name, cfg)                    # OK: add
+            print("어댑터 부착")
         return model
-    return get_peft_model(model, cfg, adapter_name=name)
-
-
-"""
-# ❌ old:
-def _enable_only_lora_on_indices_for_adapter(model, indices: List[int], adapter_name: str, is_opt: bool):
-# ✅ new:
-"""
-def _enable_only_lora_on_indices_for_adapter(model, indices: List[int], adapter_name: str):
-    # 1) all off
-    for _, p in model.named_parameters():
-        p.requires_grad = False
-
-    layers = _get_layer_container(model)
-    enabled_sites, enabled_params = 0, 0
-    for li in indices:
-        if li < 0 or li >= len(layers):
-            continue
-        for _, m in layers[li].named_modules():
-            if hasattr(m, "lora_A") and hasattr(m, "lora_B"):
-                if adapter_name in getattr(m, "lora_A", {}):
-                    for p in m.lora_A[adapter_name].parameters():
-                        p.requires_grad = True
-                        enabled_params += p.numel()
-                        enabled_sites += 1
-                if adapter_name in getattr(m, "lora_B", {}):
-                    for p in m.lora_B[adapter_name].parameters():
-                        p.requires_grad = True
-                        enabled_params += p.numel()
-                        enabled_sites += 1
-
-    print(f"[trainable] adapter={adapter_name} layers={indices} -> {enabled_sites} sites, {enabled_params} params")
-    if enabled_sites == 0:
-        # helpful debug: show available adapter keys in one layer
-        sample_keys = []
-        for m in layers[indices[0]].modules():
-            if hasattr(m, "lora_A"):
-                sample_keys = list(getattr(m, "lora_A").keys())
-            if sample_keys:
-                break
-        raise RuntimeError(
-            f"No LoRA params enabled for adapter='{adapter_name}'. "
-            f"Available adapter keys (layer {indices[0]}): {sample_keys}"
-        )
-
+    else:
+        # 아직 PeftModel이 아니면: 이 단계에서 래핑 + 어댑터 생성
+        return get_peft_model(model, cfg, adapter_name=name)
 
 def _enable_only_lora_on_indices_for_adapter_by_name(model, indices: List[int], adapter_name: str, keep_layernorm=False):
     # 1) 기본: 모든 파라미터 비활성화
@@ -500,7 +471,7 @@ def _enable_only_lora_on_indices_for_adapter_by_name(model, indices: List[int], 
         p.requires_grad = False
 
     enabled = 0
-    layer_patterns = [f"model.layers.{i}." for i in indices]
+    layer_patterns = [_layer_name_prefix(model, i) for i in indices]
     for pname, p in model.named_parameters():
         # (a) 대상 레이어 + LoRA 파라미터만 활성
         if any(pat in pname for pat in layer_patterns) and ("lora_" in pname.lower() or "lora" in pname.lower()):
@@ -521,6 +492,7 @@ def _enable_only_lora_on_indices_for_adapter_by_name(model, indices: List[int], 
 
 # ----------------------------
 # QA dataset (SQuAD / SQuAD v2) → SFT labels(mask prompt)
+# 성능 -> LoRA Rank 높여보기(r, 4,8,16,.... 일반적으로 rank8에서 성능이 정점 달성) + lora_alpha 조정하기(보통 rank의 2배값), 학습률 조정
 # ----------------------------
 def _build_prompt(context: str, question: str, unans_token="unanswerable"):
     return (
@@ -601,12 +573,82 @@ def _load_qa_sft_dataset(
         ds = ds.remove_columns(["__drop__"])
     return ds
 
+# ----------------------------
+# Plotting
+# ----------------------------
+def plot_loss(log_history, out_dir):
+    """학습 로그에서 train/validation loss를 추출하여 그래프로 저장"""
+    train_logs = [log for log in log_history if 'loss' in log]
+    eval_logs = [log for log in log_history if 'eval_loss' in log]
+
+    if not eval_logs:
+        print("[plot] No evaluation logs found, skipping plot.")
+        return
+
+    # Train loss (step 기반)
+    train_steps = [log['step'] for log in train_logs]
+    train_losses = [log['loss'] for log in train_logs]
+
+    # Eval loss (epoch 기반)
+    # eval_steps = [log['step'] for log in eval_logs] # step 기준으로도 가능
+    eval_epochs = [log['epoch'] for log in eval_logs]
+    eval_losses = [log['eval_loss'] for log in eval_logs]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_steps, train_losses, label='Training Loss', alpha=0.7)
+    # Epoch을 Step으로 변환하여 x축 통일 (선택적)
+    # 각 eval log에 해당하는 train step을 찾아서 찍으면 더 정확함
+    eval_steps_for_plot = [log['step'] for log in eval_logs]
+    plt.plot(eval_steps_for_plot, eval_losses, label='Validation Loss', marker='o', linestyle='--')
+
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Steps')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+    
+    save_path = os.path.join(out_dir, "loss_plot.png")
+    plt.savefig(save_path)
+    plt.close()
+    print(f"[plot] Loss plot saved to {save_path}")
+
 
 # ----------------------------
 # Train
 # ----------------------------
-def train_lora(model, tokenizer, out_dir: str, train_ds, lr=2e-4, epochs=1, bs=4, grad_acc=8, fp16=True, adapter_name=None):
+def train_lora(model, tokenizer, out_dir: str, train_ds, eval_ds=None, lr=2e-4, epochs=1, bs=4, grad_acc=8, fp16=True, adapter_name=None):
     os.makedirs(out_dir, exist_ok=True)
+
+    has_eval = eval_ds is not None  # 추가
+
+    """ # 공통 인자
+    ta_kwargs = dict(
+        output_dir=out_dir,
+        per_device_train_batch_size=bs,
+        gradient_accumulation_steps=grad_acc,
+        learning_rate=lr,
+        num_train_epochs=epochs,
+        logging_steps=20,
+        fp16=fp16,
+        warmup_ratio=0.1,
+        max_grad_norm=1.0,
+        report_to="none",
+    ) """
+
+    """ if has_eval:
+        ta_kwargs.update(
+            evaluation_strategy="epoch",
+            save_strategy="epoch",
+            save_total_limit=1,
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
+        )
+
+    args = TrainingArguments(**ta_kwargs)
+ """
+
+
     args = TrainingArguments(
         output_dir=out_dir,
         per_device_train_batch_size=bs,
@@ -614,20 +656,37 @@ def train_lora(model, tokenizer, out_dir: str, train_ds, lr=2e-4, epochs=1, bs=4
         learning_rate=lr,
         num_train_epochs=epochs,
         logging_steps=20,
-        save_strategy="no",
+        # --- 검증 관련 설정 추가 ---
+        #evaluation_strategy="epoch" if has_eval else "no",  # 1 에포크마다 검증 수행
+        #save_strategy="epoch" if has_eval else "no",        # 검증과 동일하게 설정 (체크포인트 저장 안 할 거면 "no" 유지 가능)
+        #save_total_limit=1 if has_eval else None,          # 마지막 체크포인트만 저장
+        #load_best_model_at_end=True if has_eval else False,  # 가장 좋은 모델을 학습 끝에 로드
+        #metric_for_best_model="eval_loss" if has_eval else None,  # Validation loss 기준
+        #greater_is_better=False if has_eval else None,
+        # -------------------------
         fp16=fp16,  # 안전 옵션
         warmup_ratio=0.1,  # 워밍업
         max_grad_norm=1.0,  # 클리핑: gradient_clip_val 대신 이걸 사용
         report_to="none",
-    )
+    ) 
 
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_ds,
-        data_collator=default_data_collator  # labels already provided
+        eval_dataset=eval_ds if has_eval else None,  # <--- 검증 데이터셋 전달
+        data_collator=default_data_collator,  # labels already provided
+        tokenizer=tokenizer, 
     )
     trainer.train()
+
+    if has_eval:
+        metrics = trainer.evaluate(eval_dataset=eval_ds)
+        print("[eval/end] metrics:", metrics)
+
+    # validation loss 작성
+    plot_loss(trainer.state.log_history, out_dir)
+
 
     if isinstance(model, PeftModel):
         try:
@@ -636,6 +695,7 @@ def train_lora(model, tokenizer, out_dir: str, train_ds, lr=2e-4, epochs=1, bs=4
             model.save_pretrained(out_dir)
     else:
         print("[warn] model is not PeftModel; adapter save may be skipped")
+
 
 
 # ----------------------------
@@ -660,6 +720,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--bs", type=int, default=4)
     ap.add_argument("--grad_acc", type=int, default=8)
+
+    ap.add_argument("--max_eval_samples", type=int, default=2000) #eval 샘플 수
     args = ap.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.base_dir, use_fast=True, local_files_only=True)
@@ -677,7 +739,6 @@ def main():
 
     # keep 32 logical layers for A stage convenience
     model = _reapply_passlayers_from_manifest(model, args.base_dir)
-
     is_opt = "opt" in model.config.model_type.lower()
 
     with open(os.path.join(args.base_dir, "prune_log.json"), "r", encoding="utf-8") as f:
@@ -685,30 +746,39 @@ def main():
     B_idx, C_idx = log["split"]["B"], log["split"]["C"]
 
     # QA SFT dataset (prompt→answer, prompt tokens masked)
-    ds = _load_qa_sft_dataset(
+    """ ds = _load_qa_sft_dataset(
         tok,
         qa_dataset=args.qa_dataset,
         split="train",
         max_samples=args.max_samples,
         seq_len=args.seq_len,
         unans_token=args.unans_token
+    ) """
+    train_ds = _load_qa_sft_dataset(
+        tok, qa_dataset=args.qa_dataset, split="train",
+        max_samples=args.max_samples, seq_len=args.seq_len
+    )
+    eval_ds = _load_qa_sft_dataset(
+        tok, qa_dataset=args.qa_dataset, split="validation",  # <--- split="validation"
+        max_samples=args.max_eval_samples, seq_len=args.seq_len
     )
 
     if args.stage == 1:
         removed = set(B_idx) | set(C_idx)
-        all_idx = list(range(getattr(model.config, "num_hidden_layers", len(_get_layers(model, is_opt)))))
+        all_idx = list(range(len(_get_layer_container(model))))
         A_idx = [i for i in all_idx if i not in removed]
 
         model = _attach_new_adapter(model, "stageA")
         model.set_adapter("stageA")
 
-        _freeze_all(model)
+        #freeze_all(model)
         #_enable_only_lora_on_indices_for_adapter(model, A_idx, "stageA")
         _enable_only_lora_on_indices_for_adapter_by_name(model, A_idx, "stageA", keep_layernorm=False)
 
         out_dir = os.path.join(args.out_adapters, "A_lora")
-        train_lora(model, tok, out_dir, ds, args.lr, args.epochs, args.bs, args.grad_acc, adapter_name="stageA")
-
+        #train_lora(model, tok, out_dir, ds, args.lr, args.epochs, args.bs, args.grad_acc, adapter_name="stageA")
+        train_lora(model, tok, out_dir, train_ds, eval_ds, args.lr, args.epochs, args.bs, args.grad_acc, adapter_name="stageA")
+        
         export_adapter_pt_and_recipe(
             model, out_dir, "stageA",
             base_dir=args.base_dir, bundles_dir=args.bundles_dir, stage="A",
@@ -716,49 +786,31 @@ def main():
         )
 
     elif args.stage == 2:
-        model = _load_prev_adapters(model, args.out_adapters, names=["stageA"])
-
-        #--- 추가: B 번들 파일 존재 검사 (rehydrate 전에) ---
+        layers = _get_layer_container(model)
+        L = len(layers)
+        AB_idx = [i for i in range(L) if i not in C_idx]  # (= A∪B)
+        
+        # --- 기존: B 번들 파일 존재 검사 및 레이어 복원 ---
         _assert_bundle_files_exist(args.bundles_dir, "B", B_idx)
-
-        # B 레이어 복원
         _rehydrate_layers(model, os.path.join(args.bundles_dir, "B"), B_idx)
+        print(f"[rehydrate] Stage B layers ({len(B_idx)}) restored.")
 
         # (2) 여기서 '실레이어' 여부 검사 (PassLayer가 아닌지)
-        layers = _get_layer_container(model)
-        bad = [i for i in B_idx if not isinstance(layers[i], LlamaDecoderLayer)]  # B는 실레이어, C는 pass인지 빠르게 점검
-        badB = [i for i in B_idx if not isinstance(layers[i], LlamaDecoderLayer)]
-        if badB:
-            raise RuntimeError(f"[check] B indices not real LlamaDecoderLayer: {badB}")
-
-        def _is_pass(m):
-            return m.__class__.__name__.lower().find("llamadecoderlayer") == -1
-        badC = [i for i in C_idx if not _is_pass(layers[i])]
-        if badC:
-            print(f"[warn] C 중 실레이어가 섞여 있음(패스 예상): {badC}")
-
+        bad = [i for i in AB_idx if not isinstance(layers[i], LlamaDecoderLayer)]
+        if bad:
+            raise RuntimeError(f"[check] AB indices not real LlamaDecoderLayer: {bad}")
+         
         # 어댑터 부착 및 학습
         model = _attach_new_adapter(
-            model, "stageB",
+            model, "stageAB",
             target_modules=("q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"),
             r=8, alpha=16, dropout=0.05
         )
-        model.set_adapter("stageB")
+        model.set_adapter("stageAB")
+        print("[adapter] Attached new adapter 'stageAB'.")
 
-        # B 한 레이어 내부에서 lora가 실제 붙었는지
-        L = _get_layer_container(model)[B_idx[0]]
-        keys = [n for n,_ in L.named_parameters() if "lora_A" in n or "lora_B" in n]
-        print("[probe] sample lora keys in layer", B_idx[0], ":", keys[:10])
-
-        # 전체 동결 → B 레이어의 LoRA만 활성
-        _freeze_all(model)
-        # 우선 안전성을 위해 keep_layernorm = False로 두기
-        _enable_only_lora_on_indices_for_adapter_by_name(model, B_idx, "stageB", keep_layernorm=False)
-
-        # (a) non-LoRA 강제 동결(혹시라도 풀린 파라미터 잠그기)
-        for n, p in model.named_parameters():
-            if "lora_" not in n.lower() and "lora" not in n.lower():
-                p.requires_grad = False
+        # AB 전 레이어에서 LoRA(stageAB)만 학습 켜기
+        _enable_only_lora_on_indices_for_adapter_by_name(model, AB_idx, "stageAB", keep_layernorm=False)
 
         # (b) trainable 요약
         trainable = [(n,p.numel()) for n,p in model.named_parameters() if p.requires_grad]
@@ -773,35 +825,28 @@ def main():
         if bad_keys:
             print("[FATAL] NaN/Inf in LoRA params:", bad_keys[:20])
             raise RuntimeError("Detected NaN/Inf in LoRA parameters — aborting.")
-        print("[OK] LoRA finite & non-LoRA frozen for stageB")
+        print("[OK] LoRA finite & non-LoRA frozen for stageAB")
 
-        out_dir = os.path.join(args.out_adapters, "B_lora")
-        train_lora(model, tok, out_dir, ds, lr=args.lr, epochs=args.epochs, bs=args.bs, grad_acc=args.grad_acc, fp16=True, adapter_name="stageB")
-
+        out_dir = os.path.join(args.out_adapters, "AB_lora")
+        #train_lora(model, tok, out_dir, ds, lr=args.lr, epochs=args.epochs, bs=args.bs, grad_acc=args.grad_acc, fp16=True, adapter_name="stageAB")
+        train_lora(model, tok, out_dir, train_ds, eval_ds, lr=args.lr, epochs=args.epochs, bs=args.bs, grad_acc=args.grad_acc, fp16=True, adapter_name="stageAB")
+        
         export_adapter_pt_and_recipe(
-            model, out_dir, "stageB",
-            base_dir=args.base_dir, bundles_dir=args.bundles_dir, stage="B",
-            trained_indices=B_idx, tokenizer_dir=args.base_dir
+            model, out_dir, "stageAB",
+            base_dir=args.base_dir, bundles_dir=args.bundles_dir, stage="AB",
+            trained_indices=AB_idx, tokenizer_dir=args.base_dir
         )
-
-    elif args.stage == 3:
+    """ elif args.stage == 3:
         # A 어댑터 로드, merge
         model = _load_prev_adapters(model, args.out_adapters, names=["stageA","stageB"])
-        model.set_adapter("stageA")
-        if hasattr(model, "merge_and_unload"):
-            print("[freeze-A] merging stageA into base...")
-            model = model.merge_and_unload()  # A 효과를 base에 고정
-            model.config.use_cache = False
-            model.to(next(model.parameters()).device)
-        else:
-            print("[warn] merge_and_unload unavailable; A를 고정하지 못했을 수 있음(권장: peft>=0.10)")
-
+       
         # 1) B, C 레이어 모두 복원(실레이어 장착)
         _assert_bundle_files_exist(args.bundles_dir, "B", B_idx)
         _assert_bundle_files_exist(args.bundles_dir, "C", C_idx)
         _rehydrate_layers(model, os.path.join(args.bundles_dir, "B"), B_idx)
         _rehydrate_layers(model, os.path.join(args.bundles_dir, "C"), C_idx)
-
+        _register_mask_alignment_hooks(model)
+        
         # (2) 복원 검증 (B, C 각각)
         layers = _get_layer_container(model)
         badB = [i for i in B_idx if layers[i].__class__.__name__.lower().find("llamadecoderlayer") == -1]
@@ -810,24 +855,25 @@ def main():
         if badB or badC:
             raise RuntimeError(f"Non-real layers detected. B:{badB}, C:{badC}. Check bundles and indices.")
 
-        # (3) B 어댑터 로드->병합 및 고정
-        model = _load_prev_adapters(model, args.out_adapters, names=["stageB"])
-        model.set_adapter("stageB")
-        if hasattr(model, "merge_and_unload"):
-            print("[freeze-B] merging stageB into base...")
-            model = model.merge_and_unload()  # B 효과를 base에 고정
-            model.config.use_cache = False
-            model.to(next(model.parameters()).device)
-        else:
-            print("[warn] merge_and_unload unavailable; B를 고정하지 못했을 수 있음")
-
         # (4) C 어댑터 장착 및 학습
         model = _attach_new_adapter(
             model, "stageC",
             target_modules=("q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"),
             r=8, alpha=16, dropout=0.05
         )
-        model.set_adapter("stageC")
+        # 활성 어댑터: A + B + C (A/B는 동결, forward에 합성됨; C만 학습)
+        def _activate_adapters(m, names):
+            try:
+                m.set_adapter(names)
+            except Exception:
+                try:
+                    m.set_active_adapters(names)
+                except Exception:
+                    m.set_adapter(names[-1])
+
+        _activate_adapters(model, ["stageA", "stageB", "stageC"])
+
+        # 전체 동결 → C 레이어 LoRA(stageC)만 켜기 (LN은 선택적으로 허용)
         _freeze_all(model)
         _enable_only_lora_on_indices_for_adapter_by_name(model, C_idx, "stageC", keep_layernorm=True)
 
@@ -846,11 +892,9 @@ def main():
             model, out_dir, "stageC",
             base_dir=args.base_dir, bundles_dir=args.bundles_dir, stage="C",
             trained_indices=C_idx, tokenizer_dir=args.base_dir
-        )
-
-    else:
-        raise ValueError("Invalid stage")
+        ) """
 
 
 if __name__ == "__main__":
     main()
+

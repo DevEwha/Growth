@@ -246,7 +246,7 @@ def evaluate_triviaqa_fixed(model, tokenizer, num_samples=1000):
                 answer_text = str(answer_data)
                 all_answers = [answer_text]
             
-            # ★ 원본 context 그대로 사용 (build_context 대신)
+
             context = ""
             if "entity_pages" in example and example["entity_pages"]:
                 entity_pages = example["entity_pages"]
@@ -310,9 +310,9 @@ def evaluate_triviaqa_fixed(model, tokenizer, num_samples=1000):
                 outputs = model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    max_new_tokens=10,  # ★ 15 → 10
+                    max_new_tokens=10, 
                     do_sample=False,
-                    temperature=1.0,    # ★ 명시적 설정
+                    temperature=1.0,    
                     use_cache=True,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,

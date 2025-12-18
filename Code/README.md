@@ -203,3 +203,5 @@ python progressive_serve.py \
 ```
 
 ---
+### 6. 참고
+구체적인 방법은 각 실험의 폴더 설명을 참고

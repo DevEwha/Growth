@@ -18,7 +18,7 @@ Origin(기본 모델)부터 Stage1, Stage2, Stage3까지 단계적으로 실행�
 ├── j_shell_newstage3_TriviaQA.sh       # Stage 3 실행 스크립트
 ├── log.py                              # 로그 작성을 위한 함수 모음
 ├── model_utils.py                      # Porgressive Load 핵심 함수
-└── results                             # 참고를 위한 결과 데이터 첨부
+└── result                             # 참고를 위한 결과 데이터 첨부
 ```
 
 ## 실행 전 준비

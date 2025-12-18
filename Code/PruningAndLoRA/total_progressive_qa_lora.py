@@ -1,20 +1,20 @@
 """
 # Stage1
-python total_progressive_qa_lora.py \
-  --base_dir ~/ProgressivePruning_ver2/A \
-  --bundles_dir ~/ProgressivePruning_ver2/bundles \
+python -m Code.PruningAndLoRA.total_progressive_qa_lora \
+  --base_dir ./results/pruning/A \
+  --bundles_dir ./results/pruning/bundles \
   --stage 1 \
-  --out_adapters ~/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad --max_samples 20000 --max_eval_samples 8000 --seq_len 2048 --epochs 3 --bs 4 --grad_acc 16
-  
+  --out_adapters ./results/adapters \
+  --qa_dataset squad --max_samples 20000 --max_eval_samples 8000 --seq_len 512 --epochs 1 --bs 4 --grad_acc 8
+ 
 
 # Stage2
-python total_progressive_qa_lora.py \
-  --base_dir ~/ProgressivePruning_ver2/A \
-  --bundles_dir ~/ProgressivePruning_ver2/bundles \
+python Code.PruningAndLoRA.total_progressive_qa_lora.py \
+  --base_dir ~/Code/results/pruning/A \
+  --bundles_dir ~/Code/results/pruning/bundles \
   --stage 2 \
-  --out_adapters ~/ProgressivePruning_ver2/adapters \
-  --qa_dataset squad --max_samples 20000 --max_eval_samples 8000 --seq_len 2048 --epochs 2 --bs 4 --grad_acc 8 --lr 2e-4
+  --out_adapters ~/Code/results/adapters \
+  --qa_dataset squad --max_samples 20000 --max_eval_samples 8000 --seq_len 512 --epochs 1 --bs 4 --grad_acc 8
 
 """
 #A어댑터, AB어댑터 생성
@@ -746,14 +746,6 @@ def main():
     B_idx, C_idx = log["split"]["B"], log["split"]["C"]
 
     # QA SFT dataset (prompt→answer, prompt tokens masked)
-    """ ds = _load_qa_sft_dataset(
-        tok,
-        qa_dataset=args.qa_dataset,
-        split="train",
-        max_samples=args.max_samples,
-        seq_len=args.seq_len,
-        unans_token=args.unans_token
-    ) """
     train_ds = _load_qa_sft_dataset(
         tok, qa_dataset=args.qa_dataset, split="train",
         max_samples=args.max_samples, seq_len=args.seq_len
@@ -771,8 +763,6 @@ def main():
         model = _attach_new_adapter(model, "stageA")
         model.set_adapter("stageA")
 
-        #freeze_all(model)
-        #_enable_only_lora_on_indices_for_adapter(model, A_idx, "stageA")
         _enable_only_lora_on_indices_for_adapter_by_name(model, A_idx, "stageA", keep_layernorm=False)
 
         out_dir = os.path.join(args.out_adapters, "A_lora")
@@ -828,7 +818,6 @@ def main():
         print("[OK] LoRA finite & non-LoRA frozen for stageAB")
 
         out_dir = os.path.join(args.out_adapters, "AB_lora")
-        #train_lora(model, tok, out_dir, ds, lr=args.lr, epochs=args.epochs, bs=args.bs, grad_acc=args.grad_acc, fp16=True, adapter_name="stageAB")
         train_lora(model, tok, out_dir, train_ds, eval_ds, lr=args.lr, epochs=args.epochs, bs=args.bs, grad_acc=args.grad_acc, fp16=True, adapter_name="stageAB")
         
         export_adapter_pt_and_recipe(

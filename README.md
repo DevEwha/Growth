@@ -89,11 +89,10 @@ Growth/
 
 ### 1. 환경 요구사항
 
-- OS: Ubuntu 24.04 (또는 유사 Linux 환경)
-- GPU: NVIDIA RTX 계열 (논문 실험은 RTX 5090 사용)
-- 드라이버: NVIDIA Driver 580.65.06+ 및 CUDA 13.0+
-- Python 3.9 이상  
-- 원격 모델 스토리지를 위한 NFSv4 (16Gbps 이더넷 환경에서 테스트)
+* OS: Linux
+* GPU: NVIDIA GPU (CUDA 지원) (RTX 3090/4090 급 24GB VRAM 이상)
+* CUDA: 12.x 권장
+* Python: 3.9 이상
 
 ### 2. 리포지토리 클론
 
@@ -105,75 +104,25 @@ cd Growth
 
 ***
 
-## 🏗️ 빌드 및 준비 (How to build)
-
-### 1. 프루닝된 레이어 그룹 생성 (오프라인 단계)
-
-```bash
-bash scripts/prepare_pruned_models.sh \
-  --model_path models/llama2-7b-base \
-  --output_dir models/llama2-7b-pruned \
-  --prune_layers 21-28
-```
-
-이 스크립트는 논문에서 제안한 각도 기반 연속 레이어 프루닝 기법을 이용하여 32개 레이어 중 21–28번 레이어를 제거하고,  
-- 그룹 A: 1–20, 29–32  
-- 그룹 B: 21–24  
-- 그룹 C: 25–28  
-로 분리·저장합니다.
-
-### 2. LoRA 어댑터 학습
-
-```bash
-bash scripts/train_lora_adapters.sh \
-  --base_model models/llama2-7b-base \
-  --pruned_groups models/llama2-7b-pruned \
-  --dataset experiments/data/squad_train.json \
-  --output_dir models/lora_adapters
-```
-
-- A 어댑터: 단계 1에서 그룹 A 위주로 성능 복구
-- AB 어댑터: 단계 2에서 그룹 A+B에 대해 최적화
-
-학습에는 대표적인 QA 데이터셋 SQuAD가 사용됩니다.
-
-***
-
 ## 🚀 실행 방법 (How to run / How to test)
 본 문서는 **PruningAndLoRA → Evaluation → ProgressiveServe(Serving)** 전체 파이프라인을 처음 보는 사람도 그대로 따라 실행하면 **논문 실험이 재현 가능**하도록 작성된 통합 README입니다.
 
 모델 및 LoRA 어댑터는 Hugging Face에 **이미 준비된 결과물**을 제공하므로, *프루닝/LoRA 학습을 직접 다시 돌리지 않고도* 평가 및 서빙 실험을 재현할 수 있습니다.
 
----
-
-### 0. 전체 구조 한눈에 보기
-
-```
-Growth/
-├── Code/
-│   ├── PruningAndLoRA/     # (선택) 프루닝 + LoRA 생성 코드
-│   ├── Evaluation/         # TriviaQA 평가 코드
-│   └── Serving/            # ProgressiveServe 서빙 코드
-└── README.md               # (본 문서)
-```
-
-#### 재현 방법 요약
+### 재현 방법 요약
 
 * **빠른 재현(권장)**: Hugging Face에서 모델 다운로드 → Evaluation + Serving 실행
 * **완전 재현**: Pruning → LoRA 학습 → Evaluation → Serving
-
----
 
 ### 1. 사전 준비
 
 #### 1.1 시스템 요구사항
 
 * OS: Linux
-* GPU: NVIDIA GPU (CUDA 지원)
+* GPU: NVIDIA GPU (CUDA 지원) (RTX 3090/4090 급 24GB VRAM 이상)
 * CUDA: 12.x 권장
 * Python: 3.9 이상
 
----
 
 ### 2. (권장) Hugging Face에서 준비된 모델 받기
 
@@ -200,11 +149,19 @@ models/pruning_lora_results/
 ├── stage2/
 ├── stage3/
 └── adapters/
+models/pruning_lora_results/
+├── A/                # Stage 1: Pruned model (Layer group A only)
+├── adapters/         # LoRA adapters
+│   ├── A_lora/       # LoRA trained on A layers (Stage 1)
+│   └── AB_lora/      # LoRA trained on A+B layers (Stage 2)
+└── bundles/          # Removed layers stored for recovery
+   ├── B/            # Layer group B
+   └── C/            # Layer group C
+
 ```
 
 > ⚠️ **중요**: 이후 모든 Evaluation / Serving 코드에서 이 경로를 `base_dir`로 사용합니다.
 
----
 
 ### 3. (선택) Pruning + LoRA 생성 전체 재현
 
@@ -255,9 +212,6 @@ python Code.PruningAndLoRA.total_progressive_qa_lora.py \
   --qa_dataset squad --epochs 1
 ```
 
----
-
-
 ### 4. Evaluation (TriviaQA Zero-shot 평가)
 
 #### 4.1 Conda 환경 설정
@@ -285,25 +239,26 @@ chmod +x j_shell_*.sh
 ```
 
 #### 4.4 단계별 평가 실행
-- Stage 0: Origin
+
+* Stage 0: Origin
 
 ```bash
 bash j_shell_origin_TriviaQA.sh
 ```
 
-- Stage 1
+* Stage 1
 
 ```bash
 bash j_shell_newstage1_TriviaQA.sh
 ```
 
-- Stage 2
+* Stage 2
 
 ```bash
 bash j_shell_newstage2_TriviaQA.sh
 ```
 
-- Stage 3
+* Stage 3
 
 ```bash
 bash j_shell_newstage3_TriviaQA.sh
@@ -323,8 +278,6 @@ bash j_shell_newstage3_TriviaQA.sh
 * **F1 Score**
 
 
----
-
 ### 5. ProgressiveServe (점진적 로딩 서빙 실험)
 
 #### 5.1 환경 설정
@@ -342,7 +295,6 @@ pip install -r requirements.txt
 python progressive_serve.py 
 ```
 
----
 #### 6. 참고
 - 구체적인 방법은 각 실험의 폴더 설명을 참고
 - 정확한 실험 재현을 위해서는 원격 서버와 모델 서버를 따로 두어 원격 서버에 모델을 다운, 모델 서버에서 Fetch를 해야 함

@@ -198,8 +198,7 @@ pip install -r requirements.txt
 ### 5.2 실행
 
 ```bash
-python progressive_serve.py \
-  --base_dir /ABSOLUTE/PATH/models/pruning_lora_results
+python progressive_serve.py 
 ```
 
 ---

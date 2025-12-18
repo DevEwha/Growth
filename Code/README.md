@@ -66,16 +66,68 @@ models/pruning_lora_results/
 
 ---
 
-## 3. Evaluation (TriviaQA Zero-shot 평가)
+## 3. (선택) Pruning + LoRA 생성 전체 재현
 
-### 3.1 Conda 환경 설정
+> ⏱️ **시간이 오래 걸리므로 논문 재현 목적이라면 생략 가능**
+
+### 3.1 환경 설정
+
+```bash
+cd Code/PruningAndLoRA
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
+```
+
+### 3.2 프루닝 실행 (Stage 1)
+
+```bash
+python -m Code.PruningAndLoRA.lib.layeronly_drop \
+  --model meta-llama/Llama-2-7b-hf \
+  --device cuda:0 \
+  --drop_frac 0.25 \
+  --keep_last_layer \
+  --nsamples 64 \
+  --seqlen 2048 \
+  --max_batches 32 \
+  --save_dir ./results/pruning/A \
+  --save_removed_dir ./results/pruning/bundles
+```
+
+### 3.3 LoRA 어댑터 생성
+
+```bash
+# Stage 1
+python Code.PruningAndLoRA.total_progressive_qa_lora.py \
+  --base_dir ./results/pruning/A \
+  --bundles_dir ./results/pruning/bundles \
+  --stage 1 \
+  --out_adapters ./results/adapters \
+  --qa_dataset squad --epochs 1
+
+# Stage 2
+python Code.PruningAndLoRA.total_progressive_qa_lora.py \
+  --base_dir ./results/pruning/A \
+  --bundles_dir ./results/pruning/bundles \
+  --stage 2 \
+  --out_adapters ./results/adapters \
+  --qa_dataset squad --epochs 1
+```
+
+---
+
+
+## 4. Evaluation (TriviaQA Zero-shot 평가)
+
+### 4.1 Conda 환경 설정
 
 ```bash
 conda env create -f environment.yml
 conda activate sllm_exp
 ```
 
-### 3.2 경로 설정 (중요)
+### 4.2 경로 설정 (중요)
 
 `j_eval_*.py` 파일 내부의 `Config` 클래스에서 **모델 경로를 수정**합니다.
 
@@ -86,13 +138,13 @@ class Config:
     device: str = "cuda:0"
 ```
 
-### 3.3 실행 권한 부여
+### 4.3 실행 권한 부여
 
 ```bash
 chmod +x j_shell_*.sh
 ```
 
-### 3.4 단계별 평가 실행
+### 4.4 단계별 평가 실행
 
 #### Stage 0: Origin
 
@@ -118,7 +170,7 @@ bash j_shell_newstage2_TriviaQA.sh
 bash j_shell_newstage3_TriviaQA.sh
 ```
 
-### 3.5 결과 확인
+### 4.5 결과 확인
 
 각 실행 후 CSV가 생성됩니다.
 
@@ -131,56 +183,6 @@ bash j_shell_newstage3_TriviaQA.sh
 * **Exact Match (EM)**
 * **F1 Score**
 
----
-
-## 4. (선택) Pruning + LoRA 생성 전체 재현
-
-> ⏱️ **시간이 오래 걸리므로 논문 재현 목적이라면 생략 가능**
-
-### 4.1 환경 설정
-
-```bash
-cd Code/PruningAndLoRA
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
-```
-
-### 4.2 프루닝 실행 (Stage 1)
-
-```bash
-python -m Code.PruningAndLoRA.lib.layeronly_drop \
-  --model meta-llama/Llama-2-7b-hf \
-  --device cuda:0 \
-  --drop_frac 0.25 \
-  --keep_last_layer \
-  --nsamples 64 \
-  --seqlen 2048 \
-  --max_batches 32 \
-  --save_dir ./results/pruning/A \
-  --save_removed_dir ./results/pruning/bundles
-```
-
-### 4.3 LoRA 어댑터 생성
-
-```bash
-# Stage 1
-python Code.PruningAndLoRA.total_progressive_qa_lora.py \
-  --base_dir ./results/pruning/A \
-  --bundles_dir ./results/pruning/bundles \
-  --stage 1 \
-  --out_adapters ./results/adapters \
-  --qa_dataset squad --epochs 1
-
-# Stage 2
-python Code.PruningAndLoRA.total_progressive_qa_lora.py \
-  --base_dir ./results/pruning/A \
-  --bundles_dir ./results/pruning/bundles \
-  --stage 2 \
-  --out_adapters ./results/adapters \
-  --qa_dataset squad --epochs 1
-```
 
 ---
 
@@ -203,4 +205,5 @@ python progressive_serve.py
 
 ---
 ### 6. 참고
-구체적인 방법은 각 실험의 폴더 설명을 참고
+- 구체적인 방법은 각 실험의 폴더 설명을 참고
+- 정확한 실험 재현을 위해서는 원격 서버와 모델 서버를 따로 두어 원격 서버에 모델을 다운, 모델 서버에서 Fetch를 해야 함

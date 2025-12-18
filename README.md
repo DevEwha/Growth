@@ -1,285 +1,206 @@
-# ProgressiveServe: Progressive Model Loading and Recovery for Mitigating Cold Start in Serverless LLM Serving
+# ProgressiveServe: 서버리스 LLM 콜드 스타트 완화를 위한 점진적 모델 로딩 및 복구
 
-**서버리스 LLM 콜드 스타트 완화를 위한 점진적 모델 로딩 및 복구 기법**
+**서버리스 환경에서 LLM 콜드 스타트를 줄이기 위한 프루닝·LoRA·점진적 로딩 파이프라인**
 
-## 📖 Overview
+## 📖 개요 (Overview)
 
-ProgressiveServe는 서버리스 환경에서 LLM(Large Language Model) 서빙 시 발생하는 콜드 스타트 문제를 해결하기 위한 점진적 모델 로딩 및 복구 파이프라인입니다. 프루닝된 경량 모델을 우선 서빙하고 백그라운드에서 전체 모델을 점진적으로 복구하여, TTFT(Time-To-First-Token)를 21.1% 단축하면서도 최종 정확도를 원본 모델 수준으로 유지합니다.
+ProgressiveServe는 서버리스 환경에서 대규모 언어 모델(LLM)을 서빙할 때 발생하는 심각한 콜드 스타트 지연을 줄이기 위한 연구용 프로토타입 시스템입니다. 프루닝된 경량 모델을 먼저 로딩·서빙하고, 백그라운드에서 전체 모델을 점진적으로 복구함으로써 초기 응답 시간을 줄이면서 최종 정확도는 원본 모델 수준으로 유지합니다.
 
-### Key Features
+### 주요 아이디어
 
-- **각도 기반 연속 레이어 프루닝**: 코사인 유사도를 활용한 레이어 중요도 평가 및 선택적 제거
-- **3단계 점진적 복구**: 경량 모델(단계 1) → 중간 모델(단계 2) → 전체 모델(단계 3) 순차 로딩
-- **LoRA 어댑터 기반 성능 복구**: 각 단계별 특화된 어댑터를 통한 성능 저하 완화
-- **PassLayer 메커니즘**: 서비스 중단 없는 동적 레이어 교체 구조
+- **각도 기반 연속 레이어 프루닝**: 레이어 입력·출력 간 코사인 유사도를 계산하여 중요도가 낮은 레이어를 선택적으로 제거하여 모델을 경량화합니다.
+- **3단계 점진적 복구**:
+  - 단계 1: 레이어 그룹 A만 로딩한 경량 모델 서빙  
+  - 단계 2: 레이어 그룹 B를 추가 로딩하여 모델 품질 향상  
+  - 단계 3: 레이어 그룹 C까지 로딩하여 원본 모델과 동일한 구조로 복구
+- **LoRA 어댑터를 이용한 성능 복구**: 단계별로 서로 다른 LoRA 어댑터(A, AB)를 부착하여 프루닝으로 인한 성능 저하를 완화합니다.
+- **PassLayer 메커니즘**: 아직 로딩되지 않은 레이어 위치를 플레이스홀더 레이어로 채워 서비스 중단 없이 실제 레이어로 교체할 수 있도록 합니다.
 
-### Performance
+### 성능 요약
 
-| Method | TTFT (s) | EM (%) | F1 (%) |
-|--------|----------|--------|--------|
-| ServerlessLLM | 114 | 55.67 | 66.11 |
-| **ProgressiveServe (Stage 1)** | **90** | 48.22 | 54.26 |
-| **ProgressiveServe (Final)** | **90** | **55.67** | **66.11** |
+TriviaQA 검증 세트와 Llama2-7B 기준 실험 결과는 다음과 같습니다.
 
-*Evaluation on TriviaQA validation set with Llama2-7B model*
+| 방법              | TTFT (s) | EM (%) | F1 (%) |
+|------------------|----------|--------|--------|
+| ServerlessLLM | 114      | 55.67  | 66.11  |
+| ProgressiveServe 단계 1 | 90       | 48.22  | 54.26  |
+| ProgressiveServe 최종 단계 | 90       | 55.67  | 66.11  |
+
+ProgressiveServe는 선행 연구 대비 TTFT를 약 21.1% 단축하면서 최종 단계에서는 EM/F1이 원본과 동일한 수준에 도달합니다.
 
 ***
 
-## 🗂️ Project Structure
+## 🗂️ 프로젝트 구조 (Source Code 설명)
 
-```
+리포지토리는 대략 다음과 같은 구조로 구성되어 있습니다.
+
+```text
 Growth/
-├── README.md                          # This file
-├── requirements.txt                   # Python dependencies
-├── configs/                           # Configuration files
-│   ├── model_config.yaml             # Model architecture settings
-│   └── pruning_config.yaml           # Pruning parameters
-├── src/                              # Source code
-│   ├── pruning/                      # Layer pruning implementation
-│   │   ├── angle_based_pruning.py   # Cosine similarity-based pruning
-│   │   └── layer_selection.py       # Layer importance evaluation
-│   ├── lora/                         # LoRA adapter training and management
-│   │   ├── adapter_trainer.py       # LoRA fine-tuning
-│   │   └── adapter_manager.py       # Multi-stage adapter switching
-│   ├── progressive_loading/          # Progressive loading pipeline
-│   │   ├── stage_manager.py         # 3-stage loading orchestration
-│   │   ├── pass_layer.py            # PassLayer placeholder implementation
-│   │   └── model_merger.py          # Layer group integration
-│   ├── serving/                      # Serverless serving infrastructure
-│   │   ├── rayserve_handler.py      # Ray Serve deployment
-│   │   └── inference_server.py      # Inference endpoint
-│   └── utils/                        # Utility functions
-│       ├── nfs_loader.py            # NFS-based model loading
-│       └── metrics.py               # TTFT, EM, F1 calculators
-├── scripts/                          # Automation scripts
-│   ├── prepare_pruned_models.sh     # Offline pruning pipeline
-│   ├── train_lora_adapters.sh       # LoRA adapter training
-│   └── deploy_serve.sh              # Serverless deployment
-├── experiments/                      # Experimental results
-│   ├── data/                        # Evaluation datasets
-│   │   ├── triviaqa_samples.json   # TriviaQA validation subset
-│   │   └── squad_train.json        # SQuAD training data for LoRA
-│   ├── results/                     # Experiment outputs
-│   │   ├── cold_start_metrics.csv  # TTFT measurements
-│   │   ├── qa_performance.csv      # EM/F1 scores per stage
-│   │   └── ablation_study.csv      # Component-wise analysis
-│   └── notebooks/                   # Analysis notebooks
-│       ├── visualize_results.ipynb # Performance visualization
-│       └── layer_importance.ipynb  # Pruning strategy analysis
-├── models/                           # Pre-trained model artifacts
-│   ├── llama2-7b-pruned/            # Pruned layer groups
-│   │   ├── group_A/                 # Layers 1-20, 29-32
-│   │   ├── group_B/                 # Layers 21-24
-│   │   └── group_C/                 # Layers 25-28
-│   └── lora_adapters/               # Trained LoRA adapters
-│       ├── adapter_A/               # Stage 1 adapter
-│       └── adapter_AB/              # Stage 2 adapter
-└── tests/                            # Unit and integration tests
-    ├── test_pruning.py
-    ├── test_lora.py
-    └── test_progressive_loading.py
+├── README.md                      # 리포지토리 설명 (본 파일)
+├── requirements.txt               # Python 의존성 목록
+├── configs/                       # 설정 파일 모음
+│   ├── model_config.yaml         # 모델 및 서빙 설정
+│   └── pruning_config.yaml       # 프루닝 관련 설정
+├── src/                          # 핵심 소스코드
+│   ├── pruning/                  # 레이어 프루닝 로직
+│   ├── lora/                     # LoRA 어댑터 학습/관리
+│   ├── progressive_loading/      # 점진적 로딩 파이프라인
+│   ├── serving/                  # Ray Serve 기반 서빙 코드
+│   └── utils/                    # NFS 로더, 메트릭 계산 등 유틸
+├── scripts/                      # 빌드/실험/배포 스크립트
+├── experiments/                  # 실험 스크립트, 결과, 노트북
+│   ├── data/                    # 평가용 데이터 샘플
+│   ├── results/                 # TTFT, EM/F1 등 결과 파일
+│   └── notebooks/               # 분석용 Jupyter 노트북
+├── models/                       # 프루닝/LoRA 결과 모델 아티팩트
+└── tests/                        # 단위/통합 테스트 코드
 ```
 
 ***
 
-## 🚀 Quick Start
+## 🔧 설치 방법 (How to install)
 
-### Prerequisites
+### 1. 환경 요구사항
 
-- Ubuntu 24.04 or compatible Linux distribution
-- NVIDIA GPU with CUDA 13.0+ support (tested on RTX 5090)
-- NVIDIA Driver 580.65.06+
-- Python 3.9+
-- 16Gbps+ network for NFS storage access
+- OS: Ubuntu 24.04 (또는 유사 Linux 환경)
+- GPU: NVIDIA RTX 계열 (논문 실험은 RTX 5090 사용)
+- 드라이버: NVIDIA Driver 580.65.06+ 및 CUDA 13.0+
+- Python 3.9 이상  
+- 원격 모델 스토리지를 위한 NFSv4 (16Gbps 이더넷 환경에서 테스트)
 
-### Installation
+### 2. 리포지토리 클론
 
 ```bash
-# Clone repository
+# 리포지토리 클론
 git clone https://github.com/DevEwha/Growth.git
 cd Growth
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install Ray Serve for serverless deployment
-pip install ray[serve]==2.9.0
-
-# Download base model (Llama2-7B)
-huggingface-cli download meta-llama/Llama-2-7b-hf --local-dir models/llama2-7b-base
 ```
 
 ***
 
-## 📦 Build and Prepare Models
+## 🏗️ 빌드 및 준비 (How to build)
 
-### Step 1: Generate Pruned Model Groups
+### 1. 프루닝된 레이어 그룹 생성 (오프라인 단계)
 
 ```bash
-# Run angle-based layer pruning (offline stage)
 bash scripts/prepare_pruned_models.sh \
-    --model_path models/llama2-7b-base \
-    --output_dir models/llama2-7b-pruned \
-    --prune_layers 21-28
+  --model_path models/llama2-7b-base \
+  --output_dir models/llama2-7b-pruned \
+  --prune_layers 21-28
 ```
 
-**Output**: Creates layer groups A (1-20, 29-32), B (21-24), C (25-28) in FP16 Safetensors format.
+이 스크립트는 논문에서 제안한 각도 기반 연속 레이어 프루닝 기법을 이용하여 32개 레이어 중 21–28번 레이어를 제거하고,  
+- 그룹 A: 1–20, 29–32  
+- 그룹 B: 21–24  
+- 그룹 C: 25–28  
+로 분리·저장합니다.[1]
 
-### Step 2: Train LoRA Adapters
+### 2. LoRA 어댑터 학습
 
 ```bash
-# Train stage-specific LoRA adapters
 bash scripts/train_lora_adapters.sh \
-    --base_model models/llama2-7b-base \
-    --pruned_groups models/llama2-7b-pruned \
-    --dataset experiments/data/squad_train.json \
-    --output_dir models/lora_adapters
+  --base_model models/llama2-7b-base \
+  --pruned_groups models/llama2-7b-pruned \
+  --dataset experiments/data/squad_train.json \
+  --output_dir models/lora_adapters
 ```
 
-**Output**: Generates `adapter_A` (optimized for Stage 1) and `adapter_AB` (optimized for Stage 2).
+- A 어댑터: 단계 1에서 그룹 A 위주로 성능 복구
+- AB 어댑터: 단계 2에서 그룹 A+B에 대해 최적화
+
+학습에는 대표적인 QA 데이터셋 SQuAD가 사용됩니다.
 
 ***
 
-## 🔧 How to Run
+## 🚀 실행 방법 (How to run / How to test)
 
-### Local Testing
+### 1. 로컬에서 ProgressiveServe 테스트
 
 ```bash
-# Test progressive loading pipeline
 python src/serving/inference_server.py \
-    --config configs/model_config.yaml \
-    --mode progressive \
-    --input "What is the capital of France?"
+  --config configs/model_config.yaml \
+  --mode progressive \
+  --input "Explain serverless computing"
 ```
 
-### Serverless Deployment with Ray Serve
+이 스크립트는 단계 1 → 2 → 3 순서로 레이어를 로딩하면서 동일 세션 내에서 모델 구조를 점진적으로 복구합니다.[1]
+
+### 2. Ray Serve 기반 "서버리스" 시나리오 실행
 
 ```bash
-# Deploy to Ray Serve (simulates serverless cold start)
+# Ray Serve로 배포 (콜드 스타트 측정을 위해 매 요청 시 Actor 새로 생성하도록 설정)
 bash scripts/deploy_serve.sh \
-    --nfs_mount /mnt/nfs_models \
-    --gpu_count 1 \
-    --port 8000
+  --nfs_mount /mnt/nfs_models \
+  --gpu_count 1 \
+  --port 8000
+```
 
-# Send inference request
+```bash
+# HTTP 요청 예시
 curl -X POST http://localhost:8000/generate \
-    -H "Content-Type: application/json" \
-    -d '{"prompt": "Explain serverless computing", "max_tokens": 50}'
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is ProgressiveServe?", "max_tokens": 50}'
 ```
 
-**Cold Start Measurement**: Each request creates a fresh Ray Actor to measure TTFT from scratch.
+논문에서는 매 트라이얼마다 Ray Actor를 새로 만들고 OS 페이지 캐시와 GPU 캐시를 초기화하여 TTFT를 측정하였습니다.[1]
 
 ***
 
-## 🧪 Experiments and Evaluation
+## 🧪 실험 데이터 및 결과
 
-### Reproduce Paper Results
+### 실험 데이터
+
+- `experiments/data/triviaqa_samples.json`  
+  - TriviaQA 검증 샘플 일부(예: 100개)를 포함하며 EM/F1 평가에 사용됩니다.[1]
+- `experiments/data/squad_train.json`  
+  - LoRA 어댑터 학습에 사용되는 SQuAD 학습 샘플을 포함합니다.[1]
+
+TriviaQA 평가 설정은 zero-shot, max_new_tokens=10, greedy decoding으로 고정하여 단계별 성능을 비교합니다.[1]
+
+### 실험 결과물
+
+- `experiments/results/cold_start_metrics.csv`  
+  - 단계별 TTFT 및 전체 벽시계 시간 측정값이 포함되어 있습니다.[1]
+- `experiments/results/qa_performance.csv`  
+  - ServerlessLLM vs ProgressiveServe(단계 1/2/3)의 EM, F1 점수가 기록됩니다.[1]
+- `experiments/results/ablation_study.csv`  
+  - LoRA 유무, 단계별 구성 등 요소별 성능 기여도를 분석한 결과가 포함됩니다.[1]
+
+### 실험 재현 방법
 
 ```bash
-# Run full evaluation pipeline (TriviaQA zero-shot)
+# 전체 평가 파이프라인 실행 (TriviaQA zero-shot)
 python experiments/evaluate_cold_start.py \
-    --dataset experiments/data/triviaqa_samples.json \
-    --baseline serverlessllm \
-    --proposed progressiveserve \
-    --trials 10 \
-    --clear_cache
+  --dataset experiments/data/triviaqa_samples.json \
+  --baseline serverlessllm \
+  --proposed progressiveserve \
+  --trials 10 \
+  --clear_cache
 
-# Results will be saved to experiments/results/
-```
-
-### Evaluation Metrics
-
-- **TTFT (Time-To-First-Token)**: Wall-clock time from actor creation to first token generation
-- **EM (Exact Match)**: Percentage of predictions exactly matching ground truth
-- **F1 Score**: Token-level overlap between prediction and ground truth
-
-### Available Experimental Data
-
-| File | Description |
-|------|-------------|
-| `cold_start_metrics.csv` | TTFT measurements across 10 trials with cache cleared |
-| `qa_performance.csv` | EM/F1 scores for each progressive stage (1→2→3) |
-| `ablation_study.csv` | Performance comparison: w/ vs w/o LoRA adapters |
-
-### Visualization
-
-```bash
-# Generate performance plots
-jupyter notebook experiments/notebooks/visualize_results.ipynb
+# 결과는 experiments/results/ 디렉토리에 저장됩니다
 ```
 
 ***
 
-## 📊 Sample Data
+## 📚 사용한 데이터/오픈소스 정리
 
-### TriviaQA Validation Samples
+### 사용 데이터셋
 
-Located in `experiments/data/triviaqa_samples.json`, contains 100 question-answer pairs for zero-shot evaluation:
+- **SQuAD**: LoRA 어댑터 학습용 QA 데이터셋
+- **TriviaQA**: 단계별 EM/F1 평가용 QA 데이터셋
 
-```json
-{
-  "question": "Who was the first president of the United States?",
-  "answer": "George Washington",
-  "context": "..."
-}
-```
+### 사용 오픈소스
 
-### SQuAD Training Data
+| 라이브러리     | 용도                           | 라이선스   |
+|----------------|--------------------------------|-----------|
+| PyTorch        | 딥러닝 프레임워크              | BSD-3-Clause |
+| Hugging Face Transformers | Llama2-7B 로딩 및 토크나이저 | Apache 2.0 |
+| PEFT           | LoRA 어댑터 구현 및 학습       | Apache 2.0 |
+| Ray Serve      | 서버리스 유사 서빙 인프라      | Apache 2.0 |
+| Safetensors    | 모델 체크포인트 저장 포맷      | Apache 2.0 |
+| Datasets       | SQuAD, TriviaQA 로딩           | Apache 2.0 |
 
-Located in `experiments/data/squad_train.json`, used for LoRA adapter fine-tuning:
-
-```json
-{
-  "context": "...",
-  "question": "...",
-  "answers": [{"text": "...", "answer_start": 0}]
-}
-```
-
-***
-
-## 🛠️ Configuration
-
-### Model Configuration (`configs/model_config.yaml`)
-
-```yaml
-model:
-  name: llama2-7b
-  precision: fp16
-  nfs_path: /mnt/nfs_models/llama2-7b-pruned
-
-progressive_loading:
-  stages:
-    - name: stage1
-      layers: [1-20, 29-32]
-      lora_adapter: adapter_A
-    - name: stage2
-      layers: [1-24, 29-32]
-      lora_adapter: adapter_AB
-    - name: stage3
-      layers: [1-32]
-      lora_adapter: null
-
-serving:
-  framework: rayserve
-  gpu_memory: 24GB
-  max_concurrent_requests: 1
-```
-
-***
-
-## 🔬 Used Open Source Libraries
-
-| Library | Version | Purpose | License |
-|---------|---------|---------|---------|
-| PyTorch | 2.0+ | Deep learning framework | BSD-3-Clause |
-| Transformers | 4.35+ | Hugging Face model hub | Apache 2.0 |
-| PEFT | 0.7+ | LoRA adapter implementation | Apache 2.0 |
-| Ray Serve | 2.9+ | Serverless deployment framework | Apache 2.0 |
-| Safetensors | 0.4+ | Efficient model serialization | Apache 2.0 |
-| Datasets | 2.14+ | SQuAD/TriviaQA data loading | Apache 2.0 |
-
-### Key References
+### 주요 참고 문헌
 
 1. **ServerlessLLM**: Y. Fu et al., "ServerlessLLM: Low-latency serverless inference for large language models," USENIX OSDI 2024
 2. **LoRA**: E. J. Hu et al., "LoRA: Low-rank adaptation of large language models," arXiv:2106.09685
@@ -288,30 +209,22 @@ serving:
 
 ***
 
-## 🧑‍💻 Authors
+## 👩‍💻 저자 및 연락처
 
-**Equal Contribution**
+**공동 제1저자***
 
-- **Nadam Park** (parknd@ewhain.net)
-- **Nakyeong Lee** (rinarina0429@ewha.ac.kr)
-- **Juwon Lee** (juwonlee.cse@gmail.com)
+- 박나담 (Nadam Park) – parknd@ewhain.net  
+- 이나경 (Nakyeong Lee) – rinarina0429@ewha.ac.kr  
+- 이주원 (Juwon Lee) – juwonlee.cse@gmail.com  
 
-**Advisor**
+**지도교수**
 
-- **Jaehyeong Sim** (jh.sim@ewha.ac.kr)
+- 심재형 (Jaehyeong Sim) – jh.sim@ewha.ac.kr  
 
-Department of Computer Science and Engineering, Ewha Womans University
-
-***
-
-## 📄 Citation
-
-If you use this code in your research, please cite our paper
+이화여자대학교 컴퓨터공학과
 
 ***
 
-## 📝 License
+## 📝 라이선스
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-***
+본 프로젝트는 MIT 라이선스 하에 배포됩니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참고해주세요.

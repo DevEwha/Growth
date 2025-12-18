@@ -36,24 +36,51 @@ ProgressiveServe는 선행 연구 대비 TTFT를 약 21.1% 단축하면서 최�
 
 ```text
 Growth/
-├── README.md                      # 리포지토리 설명 (본 파일)
-├── requirements.txt               # Python 의존성 목록
-├── configs/                       # 설정 파일 모음
-│   ├── model_config.yaml         # 모델 및 서빙 설정
-│   └── pruning_config.yaml       # 프루닝 관련 설정
-├── src/                          # 핵심 소스코드
-│   ├── pruning/                  # 레이어 프루닝 로직
-│   ├── lora/                     # LoRA 어댑터 학습/관리
-│   ├── progressive_loading/      # 점진적 로딩 파이프라인
-│   ├── serving/                  # Ray Serve 기반 서빙 코드
-│   └── utils/                    # NFS 로더, 메트릭 계산 등 유틸
-├── scripts/                      # 빌드/실험/배포 스크립트
-├── experiments/                  # 실험 스크립트, 결과, 노트북
-│   ├── data/                    # 평가용 데이터 샘플
-│   ├── results/                 # TTFT, EM/F1 등 결과 파일
-│   └── notebooks/               # 분석용 Jupyter 노트북
-├── models/                       # 프루닝/LoRA 결과 모델 아티팩트
-└── tests/                        # 단위/통합 테스트 코드
+├── 1stReport/                  # 1차 보고서 자료
+├── 2ndReport/                  # 2차 보고서 자료
+├── Code/                       # 실험 및 서빙 관련 코드
+│   ├── Check/                  # 모델 성능 평가 및 검증 코드
+│   │   ├── environment.yml
+│   │   ├── j_eval_newstage1_fixed_TriviaQA.py
+│   │   ├── j_eval_newstage2_fixed_TriviaQA.py
+│   │   ├── j_eval_newstage3_fixed_TriviaQA.py
+│   │   ├── j_eval_origin3_TriviaQA.py
+│   │   ├── j_shell_newstage1_TriviaQA.sh
+│   │   ├── j_shell_newstage2_TriviaQA.sh
+│   │   ├── j_shell_newstage3_TriviaQA.sh
+│   │   ├── j_shell_origin_TriviaQA.sh
+│   │   ├── log.py
+│   │   ├── model_utils.py
+│   │   ├── logs/               # 실행 로그 저장
+│   │   ├── result/             # 평가 결과 저장
+│   │   ├── __pycache__/
+│   │   └── README.md
+│   │
+│   ├── PruningAndLoRA/          # Pruning 및 LoRA 기반 실험 코드
+│   │   ├── lib/                 # 공용 라이브러리
+│   │   ├── total_progressive_qa_lora.py
+│   │   ├── pruningandlora.md
+│   │   ├── requirements.txt
+│   │   ├── README.md
+│   │   └── __pycache__/
+│   │
+│   ├── Serving/                 # 모델 서빙 관련 코드
+│   │   ├── models/              # 서빙용 모델 파일
+│   │   ├── progressive_serve.py
+│   │   ├── model_utils.py
+│   │   ├── pull.py
+│   │   ├── requirements.txt
+│   │   ├── README.md
+│   │   ├── venv/                # 가상환경
+│   │   └── __pycache__/
+│   │
+│   ├── drop_run.log
+│   └── README.md
+│
+├── results/                     # 실험 결과 정리
+├── drop_run.log
+├── .gitignore
+└── README.md
 ```
 
 ***
@@ -93,7 +120,7 @@ bash scripts/prepare_pruned_models.sh \
 - 그룹 A: 1–20, 29–32  
 - 그룹 B: 21–24  
 - 그룹 C: 25–28  
-로 분리·저장합니다.[1]
+로 분리·저장합니다.
 
 ### 2. LoRA 어댑터 학습
 
@@ -114,16 +141,32 @@ bash scripts/train_lora_adapters.sh \
 
 ## 🚀 실행 방법 (How to run / How to test)
 
-### 1. 로컬에서 ProgressiveServe 테스트
+### 1. ProgressiveServe 테스트
 
+#### 1. 가상환경 활성화
+앞에서 이 과정을 진행했을 경우 생략합니다.
 ```bash
-python src/serving/inference_server.py \
-  --config configs/model_config.yaml \
-  --mode progressive \
-  --input "Explain serverless computing"
+# 가상환경 생성
+python -m venv venv
+
+# 가상환경 활성화
+source venv/bin/activate
+
+# requirements.txt 설치
+pip install -r requirements.txt
 ```
 
-이 스크립트는 단계 1 → 2 → 3 순서로 레이어를 로딩하면서 동일 세션 내에서 모델 구조를 점진적으로 복구합니다.[1]
+#### 2. 모델 다운로드
+PruningAndLoRA를 통해 이미 모델이 준비되었을 경우 생략합니다.
+```bash
+python pull.py
+```
+
+#### 3. 코드 실행
+```bash
+python progressive_serve.py
+```
+이 스크립트는 단계 1 → 2 → 3 순서로 레이어를 로딩하면서 동일 세션 내에서 모델 구조를 점진적으로 복구합니다.
 
 ### 2. Ray Serve 기반 "서버리스" 시나리오 실행
 
@@ -151,9 +194,9 @@ curl -X POST http://localhost:8000/generate \
 ### 실험 데이터
 
 - `experiments/data/triviaqa_samples.json`  
-  - TriviaQA 검증 샘플 일부(예: 100개)를 포함하며 EM/F1 평가에 사용됩니다.[1]
+  - TriviaQA 검증 샘플 일부(예: 100개)를 포함하며 EM/F1 평가에 사용됩니다.
 - `experiments/data/squad_train.json`  
-  - LoRA 어댑터 학습에 사용되는 SQuAD 학습 샘플을 포함합니다.[1]
+  - LoRA 어댑터 학습에 사용되는 SQuAD 학습 샘플을 포함합니다.
 
 TriviaQA 평가 설정은 zero-shot, max_new_tokens=10, greedy decoding으로 고정하여 단계별 성능을 비교합니다.[1]
 

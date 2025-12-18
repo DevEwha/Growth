@@ -61,7 +61,7 @@ def gpu_timer(label: str = ""):
 
 @dataclass
 class Config:
-    base_dir: str = "/home/devewha/new_model"
+    base_dir: str = "/acpl-ssd20/1218_pruningmodel"
     device: str = "cuda:0"
     
     @property

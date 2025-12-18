@@ -6,5 +6,5 @@
 export CUDA_VISIBLE_DEVICES=1        # 사용할 GPU 지정 (0,1,2,... 중 하나)
 
 # 실행
-python "/home/devewha/DEMO/j_eval_newstage3_fixed_TriviaQA.py" \
+python "/home/devewha/Growth/Growth/Code/Check/j_eval_newstage3_fixed_TriviaQA.py" \
   2>&1 | tee "./logs/new_stage1${CUDA_VISIBLE_DEVICES}_$(date +%Y%m%d_%H%M%S).log"

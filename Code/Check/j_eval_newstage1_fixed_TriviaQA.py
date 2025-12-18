@@ -61,7 +61,7 @@ def gpu_timer(label: str = ""):
 
 @dataclass
 class Config:
-    base_dir: str = "/acpl-ssd20/1218"
+    base_dir: str = "/acpl-ssd20/1218" # 이 부분을 실제 모델이 있는 폴더 위치로 수정해 주세요
     device: str = "cuda:0"
     
     @property

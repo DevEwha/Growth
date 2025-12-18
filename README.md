@@ -352,36 +352,14 @@ python progressive_serve.py
 ## 🧪 실험 데이터 및 결과
 
 ### 실험 데이터
+- TriviaQA 검증 샘플 일부(예: 100개)를 포함하며 EM/F1 평가에 사용됩니다.
+- LoRA 어댑터 학습에 사용되는 SQuAD 학습 샘플을 포함합니다.
 
-- `experiments/data/triviaqa_samples.json`  
-  - TriviaQA 검증 샘플 일부(예: 100개)를 포함하며 EM/F1 평가에 사용됩니다.
-- `experiments/data/squad_train.json`  
-  - LoRA 어댑터 학습에 사용되는 SQuAD 학습 샘플을 포함합니다.
-
-TriviaQA 평가 설정은 zero-shot, max_new_tokens=10, greedy decoding으로 고정하여 단계별 성능을 비교합니다.[1]
+TriviaQA 평가 설정은 zero-shot, max_new_tokens=10, greedy decoding으로 고정하여 단계별 성능을 비교합니다.
 
 ### 실험 결과물
 
-- `experiments/results/cold_start_metrics.csv`  
-  - 단계별 TTFT 및 전체 벽시계 시간 측정값이 포함되어 있습니다.[1]
-- `experiments/results/qa_performance.csv`  
-  - ServerlessLLM vs ProgressiveServe(단계 1/2/3)의 EM, F1 점수가 기록됩니다.[1]
-- `experiments/results/ablation_study.csv`  
-  - LoRA 유무, 단계별 구성 등 요소별 성능 기여도를 분석한 결과가 포함됩니다.[1]
-
-### 실험 재현 방법
-
-```bash
-# 전체 평가 파이프라인 실행 (TriviaQA zero-shot)
-python experiments/evaluate_cold_start.py \
-  --dataset experiments/data/triviaqa_samples.json \
-  --baseline serverlessllm \
-  --proposed progressiveserve \
-  --trials 10 \
-  --clear_cache
-
-# 결과는 experiments/results/ 디렉토리에 저장됩니다
-```
+- https://huggingface.co/dddreamerrr/pruning_lora_results
 
 ***
 
@@ -414,7 +392,7 @@ python experiments/evaluate_cold_start.py \
 
 ## 👩‍💻 저자 및 연락처
 
-**공동 제1저자***
+**공동 제1저자**
 
 - 박나담 (Nadam Park) – parknd@ewhain.net  
 - 이나경 (Nakyeong Lee) – rinarina0429@ewha.ac.kr  
